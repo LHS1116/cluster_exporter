@@ -190,11 +190,11 @@ def get_gpu_usage_by_job(job_id) -> float:
 
     pass
 
-
-print(get_history_job_and_user())
-get_history_jobs_by_user('root')
-print(get_online_users())
-print(get_job_id_filter())
-print(get_running_jobs_by_user('root'))
-print(get_running_jobs_by_user('roott'))
-print(get_sacct_data()[:5])
+#
+# print(get_history_job_and_user())
+# get_history_jobs_by_user('root')
+# print(get_online_users())
+# print(get_job_id_filter())
+# print(get_running_jobs_by_user('root'))
+# print(get_running_jobs_by_user('roott'))
+# print(get_sacct_data()[:5])
