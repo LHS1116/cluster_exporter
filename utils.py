@@ -10,10 +10,27 @@ import subprocess
 import sys
 import traceback
 from typing import Dict, List
+import time
+from typing import List, Dict, Union
+import threading
+import requests
+from itsdangerous import TimedSerializer, TimestampSigner
 
+sec_key = "w183$sjOv&"
+serializer = TimedSerializer(sec_key)
+signer = TimestampSigner(sec_key)
+
+
+def generate_token(value: str):
+    try:
+        t = signer.sign(value)
+        return t
+    except Exception as e:
+        print(e)
+        return ''
 
 def format_data(data: List[str]) -> List[Dict]:
-    keys = list(filter(lambda x:x.strip(), data[0].split()))
+    keys = list(filter(lambda x: x.strip(), data[0].split()))
     res = []
     for val in data[1:]:
         _value = list(filter(lambda x: x.strip(), val.split()))
@@ -31,7 +48,7 @@ def get_squeue_data() -> List[Dict]:
 
 def get_sacct_data(job_id=None, username=None) -> List[Dict]:
     """{$job_id: {$column: $value,...}}"""
-    columns = ['User', 'JobID', 'State', 'QOS', 'AveRSS', 'ReqCPUS', 'ReqTRES']
+    columns = ['User', 'JobID', 'JobName', 'State', 'QOS', 'AveRSS', 'ReqCPUS', 'ReqTRES', 'Submit', 'Start', 'End', ]
     fmt = ','.join(columns)
     command = f'sacct -a --format="{fmt}" {f"-j {job_id}" if job_id else ""}'  # 根据需要增加
     print(command)
@@ -58,7 +75,29 @@ def get_sacct_data(job_id=None, username=None) -> List[Dict]:
 
 
 def get_sstat_data(job_id=None):
-    pass
+    columns = ['User', 'JobID', 'State', 'AveRSS', 'ReqCPUS', 'ReqTRES', 'Nodelist']
+    fmt = ','.join(columns)
+    command = f'sstat -a --format="{fmt}" {f"-j {job_id}" if job_id else ""}'  # 根据需要增加
+    print(command)
+    _list = []
+    res = subprocess.getoutput(command).split('\n')
+    res = list(filter(lambda x: x.find('ignoring it') == -1, res))
+    char_count_list = list(map(lambda x: len(x), res[1].split()))  # 获取每个字段的字符下标长度范围
+    assert len(char_count_list) == len(columns)
+    data = res[2:]
+
+    _res = []
+    for val in data:
+        flag = 0
+        _list = []
+        for i in char_count_list:
+            _list.append(val[flag:flag + i])
+            flag += i
+            flag += 1  # 空格
+        _list = map(lambda x: x.strip(), _list)
+        tmp = dict(zip(columns, _list))
+        _res.append(tmp)
+
 
 def get_job_id_filter(job_stat: str = None) -> List[int]:
     squeue_data = get_squeue_data()
@@ -71,14 +110,15 @@ def get_job_id_filter(job_stat: str = None) -> List[int]:
     values = list(map(lambda x: int(x), values))
     return values
 
+
 def get_job_user(job_id) -> str:
     command = f'scontrol show job {job_id}'
     res = subprocess.getoutput(command)
     user_exp = r"UserId=([^\(]+)\(\d+\)"
-    # print(re.compile(user_exp).search(a).groups())
     user_name = re.search(user_exp, res).group(1)
     assert len(user_name) >= 1, f'slurm job(id={job_id}) not exists'
     return user_name
+
 
 def get_job_stats(job_id) -> Dict:
     command = f'sstat -a --format="JobId,Pids,AveCPU,AveRSS,AveCPUFreq,MaxRSS" -j {job_id}'
@@ -108,6 +148,13 @@ def get_cluster_gpu_stats() -> Dict:
     try:
         command = "slurm_gpustat"
         res = subprocess.getoutput(command)
+        res = {
+            'total_gpu_info': {'rtx6k': 3, 'v100': 2, 'm40': 3, 'p40': 4},
+            'accessible_gpu_info': {'rtx6k': 1, 'v100': 2, 'm40': 3, 'p40': 4},
+            'user_usage_info': {'user1': 1, 'user2': 1, 'user3': 3},
+            'available_gpu_info': {'p40': 0, 'rtx6k': 1, 'v100': 2, 'm40': 2}
+        }
+        return res
         res = res.split('----------------------')
         res = list(filter(lambda x: x.strip(), res))[1:]
         for val in res:
@@ -136,7 +183,6 @@ def get_cluster_gpu_stats() -> Dict:
         print(e)
         traceback.print_tb(sys.exc_info()[2])
         return {}
-
 
 
 def get_history_job_and_user() -> Dict:
@@ -168,9 +214,9 @@ def get_running_jobs_by_user(username) -> List[int]:
     if len(squeue_data) == 0:
         return []
     values = squeue_data
-    values = map(lambda x: int(x.get('JOBID')), filter(lambda x: x.get('ST') == 'R' and x.get('USER') == username, values))
+    values = map(lambda x: int(x.get('JOBID')),
+                 filter(lambda x: x.get('ST') == 'R' and x.get('USER') == username, values))
     return list(values)
-
 
 
 def get_online_users() -> List[str]:
@@ -187,9 +233,65 @@ def get_online_users() -> List[str]:
 
 
 def get_gpu_usage_by_job(job_id) -> float:
-
     pass
 
+def get_gpu_usage_by_node() -> List:
+    return []
+
+
+def get_nodes() -> Dict:
+    command = "scontrol show nodes"
+    res = subprocess.getoutput(command).split('\n')
+    res = filter(lambda x: x and x.find('OS=') == -1, res)
+    data = []  # node_name: node
+    _node = []
+    for val in res:
+        if val[:8] == 'NodeName' and _node:
+            data.append(_node)
+            _node = []
+
+        _node.extend(val.split())
+    if _node:
+        data.append(_node)
+
+
+    data = [map(lambda x: x.split('='), node) for node in data]
+    data = [{x[0]: x[1] for x in node} for node in data]
+    data = {node['NodeName']: node for node in data}
+    return data
+
+def do_upload_data():
+    """上传集群信息到web服务器"""
+    current_user = get_online_users()
+    sacct_info = get_sacct_data()
+    nodes = get_nodes()
+    gpu_stat = get_cluster_gpu_stats()
+    node_gpus = get_gpu_usage_by_node()
+    data = {
+        'current_user': current_user,
+        'jobs': sacct_info,
+        'nodes': nodes,
+        'gpu_stat': gpu_stat,
+        'node_gpu': node_gpus
+    }
+    token = generate_token('cluster_exporter')
+    header = {
+        'Token': token
+    }
+    url = 'http://172.16.165.1:8000/data/upload'
+    r = requests.post(url, json=data, headers=header)
+
+    print(r.content)
+
+
+def upload_data():
+    threading.Thread(target=do_upload_data()).start()
+
+
+
+# do_upload_data()
+# print(generate_token('test'))
+# print(get_nodes())
 #
 # print(get_history_job_and_user())
 # get_history_jobs_by_user('root')
