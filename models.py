@@ -1,55 +1,90 @@
-# # -*- coding: utf-8 -*-
-# """
-# @Describe:
-# @Time    : 2022/2/15 4:40 下午
-# @Author  : liuhuangshan
-# @File    : models.py
-# """
-#
-#
-# import re
-# import subprocess
-# from prometheus_client.core import GaugeMetricFamily, REGISTRY
-# from prometheus_client import make_wsgi_app
-# from wsgiref.simple_server import make_server
-#
-#
-# class CustomCollector(object):
-#     def add(self, params):
-#         sum = 0
-#         for i in params:
-#             sum += int(i)
-#         return sum
-#
-#     def collect(self):
-#         output = subprocess.Popen("scontrol show nodes",
-#                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-#         out_put = output.communicate()[0]
-#         if out_put:
-#             count = re.findall(r'CPUTot=(\d+)', out_put)
-#             total_c = self.add(count)
-#             yield GaugeMetricFamily('slurm_cpu_total', 'total_count', value=total_c)
-#
-#             used = re.findall(r'CPUAlloc=(\d+)', out_put)
-#             used_cpu = self.add(used)
-#             yield GaugeMetricFamily('slurm_cpu_used', 'used_count', value=used_cpu)
-#
-#             real_memory = re.findall(r'RealMemory=(\d+)', out_put)
-#             total_memory = self.add(real_memory)
-#             yield GaugeMetricFamily('slurm_memory_total', 'total_memory', value=total_memory)
-#
-#             alloc_memory = re.findall(r'AllocMem=(\d+)', out_put)
-#             used_memory = self.add(alloc_memory)
-#             yield GaugeMetricFamily('slurm_memory_used', 'used_memory', value=used_memory)
-#
-#
-# REGISTRY.register(CustomCollector())
-#
-# if __name__ == '__main__':
-#     coll = CustomCollector()
-#     for i in coll.collect():
-#         print(i)
-#
-#     app = make_wsgi_app()
-#     httpd = make_server('', 8000, app)
-#     httpd.serve_forever()
+# -*- coding: utf-8 -*-
+"""
+@Describe:
+@Time    : 2022/1/20 5:21 下午
+@Author  : liuhuangshan
+@File    : models.py
+"""
+from flask import Response, jsonify
+from datetime import datetime
+
+
+class SlurmResponse(Response):
+    @classmethod
+    def force_type(cls, response, environ=None):
+        if isinstance(response, (list, dict)):
+            response = jsonify(response)
+        return super(Response, cls).force_type(response, environ)
+
+
+class SlurmEntity:
+    created_timestamp: int
+    def __init__(self):
+        self.created_timestamp = int(datetime.now().timestamp())
+
+
+    @classmethod
+    def from_dict(cls, values: dict):
+        if values is None or len(values) == 0:
+            return None
+        entity = cls()
+        entity.__dict__.update(values)
+        return entity
+
+    def __str__(self):
+        return str(self.__dict__)
+
+
+class SlurmNode(SlurmEntity):
+    name: str
+    group_id: int
+    state: str
+    partition_name: str
+    cpu_tot: int
+    mem: int
+    alloc_tres: str
+
+    def __init__(self, name, group_id, state, partition_name, cpu_tot=None, mem=None, alloc_tres=None):
+        self.name = name
+        self.group_id = group_id
+        self.state = state
+        self.partition_name = partition_name
+        self.cpu_tot = cpu_tot
+        self.mem = mem
+        self.alloc_tre = alloc_tres
+
+
+class SlurmJob(SlurmEntity):
+    job_id: int
+    user: str
+    node: str
+    partition: str
+    tres: dict
+    ave_cpu_time: int
+    gpu_alloc: int
+    gpu_used: int
+    cpu_alloc: int
+    # cpu_used: int
+    gpu_utilization: float
+    cpu_utilization: float
+    submit_time: datetime
+    start_time: datetime
+    end_time: datetime
+    running_time: str
+    qos: str
+    state: str
+
+
+class SlurmPartition(SlurmEntity):
+    name: str
+    qos: str
+    nodes: list
+    state: str
+    tres: dict
+    default: int
+    cpu_total: int
+    cpu_alloc: int
+    gpu_total: int
+    gpu_alloc: int
+
+

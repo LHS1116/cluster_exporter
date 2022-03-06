@@ -5,6 +5,8 @@
 @Author  : liuhuangshan
 @File    : utils.py
 """
+import datetime
+import random
 import re
 import subprocess
 import sys
@@ -15,11 +17,46 @@ from typing import List, Dict, Union
 import threading
 import requests
 from itsdangerous import TimedSerializer, TimestampSigner
-
+from models import *
 sec_key = "w183$sjOv&"
 serializer = TimedSerializer(sec_key)
 signer = TimestampSigner(sec_key)
+web_domain = 'http://192.168.137.12:8000/api'
 
+
+def transfer_time(time_str):
+    if not time_str:
+        return None
+    return datetime.datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%S")
+
+
+def get_seconds(time_str):
+    """h:m:s -> seconds"""
+    lst = time_str.split(':')
+    seconds = int(lst[0]) * 3600 + int(lst[1]) * 60 + int(lst[2])
+    return seconds
+
+
+def cal_timedelta(start: datetime, end: datetime) -> str:
+    if not start or not end:
+        return ''
+    seconds = int((end - start).total_seconds())
+    days = int(seconds / (3600 * 24))
+    seconds %= (3600 * 24)
+    hours = int(seconds / 3600)
+    seconds %= 3600
+    minutes = int(seconds / 60)
+    seconds %= 60
+    seconds = round(seconds, 2)
+    res = ''
+    if days:
+        res += f'{days} d '
+    if hours:
+        res += f'{hours} h '
+    if minutes:
+        res += f'{minutes} m '
+    res += f'{seconds} s'
+    return res
 
 def generate_token(value: str):
     try:
@@ -38,17 +75,80 @@ def format_data(data: List[str]) -> List[Dict]:
         res.append(dict(zip(keys, _value)))
     return res
 
+def format_node_name(name: List):
+    _nodes = []
+    for node in name:
+        if node.find('[') == -1:
+            _nodes.append(node)
+        else:
+            _tmp = node.replace(']', '')
+            _tmp = _tmp.split('[')
+            _labels = _tmp[1].split('-')
+            for _label in _labels:
+                _nodes.append(_tmp[0] + _label)
+    return _nodes
 
-def get_squeue_data() -> List[Dict]:
-    command = 'squeue'
-    res = subprocess.getoutput(command).split('\n')
-    data = format_data(res)
+def get_squeue_data(all=False) -> List[Dict]:
+    if not all:
+        command = 'squeue'
+        res = subprocess.getoutput(command).split('\n')
+        data = format_data(res)
+    else:
+        command = 'squeue -o %all'
+        res = subprocess.getoutput(command).split('\n')
+        keys = res[0].split('|')
+        data = []
+        for val in res[1:]:
+            _vals = val.split('|')
+            assert len(_vals) == len(keys)
+            data.append(dict(zip(keys, _vals)))
     return data
 
 
-def get_sacct_data(job_id=None, username=None) -> List[Dict]:
+def get_sinfo_data(return_dict=False) -> List[Union[SlurmPartition, Dict]]:
+    """获取队列信息"""
+    res = """PARTITION$AVAIL$NODES(A/I)$MAX_CPUS_PER_NODE$CPUS$CPUS(A/I/O/T)$NODES(A/I/O/T)$GRES$NODELIST$S:C:T
+debug*$up$0/2$UNLIMITED$2$0/4/0/4$0/2/0/2$(null)$lhs-[01-02]$2:1:1"""
+    res = res.split('\n')
+    command = "sinfo -o %P$%a$%A$%B$%c$%C$%F$%G$%N$%z"
+    """A/I/O/T = allocated/idle/other/total"""
+    """sockets、cores、threads（S:C:T）"""
+    # res = subprocess.getoutput(command).split('\n')
+
+    column_names = res[0].split('$')
+    data = []
+    for val in res[1:]:
+        part = SlurmPartition()
+        part_val = val.split('$')
+        assert len(column_names) == len(part_val)
+        info = dict(zip(column_names, part_val))
+        part_name = info.get('PARTITION')
+        if part_name and part_name[-1] == '*':
+            part.default = 1
+            part_name = part_name[:-1]
+        cpu_aiot = info['CPUS(A/I/O/T)'].split('/')
+        node_aiot = info['NODES(A/I/O/T)'].split('/')
+        nodes = info['NODELIST'].split(',')
+        _nodes = format_node_name(nodes)
+
+        part.name = part_name
+        part.state = info['AVAIL']
+        part.cpu_total = cpu_aiot[3]
+        part.cpu_alloc = cpu_aiot[0]
+        part.nodes = _nodes
+
+        #  TODO:从GRES获取GPU信息
+        part.gpu_alloc = 0
+        part.gpu_total = 0
+
+        data.append(part.__dict__ if return_dict else part)
+        # print(part.__dict__)
+    return data
+
+
+def get_sacct_data(start=None, end=None, job_id=None) -> List[Union[SlurmJob, Dict]]:
     """{$job_id: {$column: $value,...}}"""
-    columns = ['User', 'JobID', 'JobName', 'State', 'QOS', 'AveRSS', 'ReqCPUS', 'ReqTRES', 'Submit', 'Start', 'End', ]
+    columns = ['User', 'JobID', 'Partition', 'JobName', 'State', 'AllocTRES', 'AllocGRES', 'AllocCPUS', 'QOS', 'AveCPU','ReqCPUS', 'CPUTime', 'TotalCPU', 'UserCPU', 'ReqTRES', 'Submit', 'Start', 'End']
     fmt = ','.join(columns)
     command = f'sacct -a --format="{fmt}" {f"-j {job_id}" if job_id else ""}'  # 根据需要增加
     print(command)
@@ -58,7 +158,6 @@ def get_sacct_data(job_id=None, username=None) -> List[Dict]:
     char_count_list = list(map(lambda x: len(x), res[1].split()))  # 获取每个字段的字符下标长度范围
     assert len(char_count_list) == len(columns)
     data = res[2:]
-
     _res = []
     for val in data:
         flag = 0
@@ -69,15 +168,15 @@ def get_sacct_data(job_id=None, username=None) -> List[Dict]:
             flag += 1  # 空格
         _list = map(lambda x: x.strip(), _list)
         tmp = dict(zip(columns, _list))
-        if not username or tmp.get('User') == username:
-            _res.append(tmp)
+        _res.append(tmp)
     return _res
 
 
-def get_sstat_data(job_id=None):
-    columns = ['User', 'JobID', 'State', 'AveRSS', 'ReqCPUS', 'ReqTRES', 'Nodelist']
+def get_sstat_data(job_id=None) -> Union[Dict, List[Dict]]:
+    columns = ['User', 'JobID', 'State', 'AveCPU', 'AveRSS', 'ReqCPUS', 'ReqTRES', 'Nodelist']
     fmt = ','.join(columns)
     command = f'sstat -a --format="{fmt}" {f"-j {job_id}" if job_id else ""}'  # 根据需要增加
+
     print(command)
     _list = []
     res = subprocess.getoutput(command).split('\n')
@@ -97,6 +196,8 @@ def get_sstat_data(job_id=None):
         _list = map(lambda x: x.strip(), _list)
         tmp = dict(zip(columns, _list))
         _res.append(tmp)
+    return _res
+    # for
 
 
 def get_job_id_filter(job_stat: str = None) -> List[int]:
@@ -209,13 +310,16 @@ def get_history_jobs_by_user(username) -> List[int]:
     return user_dict.get(username, [])
 
 
-def get_running_jobs_by_user(username) -> List[int]:
+def get_running_jobs(username=None) -> List[int]:
     squeue_data = get_squeue_data()
     if len(squeue_data) == 0:
         return []
     values = squeue_data
-    values = map(lambda x: int(x.get('JOBID')),
-                 filter(lambda x: x.get('ST') == 'R' and x.get('USER') == username, values))
+    if username:
+        values = map(lambda x: int(x.get('JOBID')),
+                     filter(lambda x: x.get('ST') == 'R' and x.get('USER') == username, values))
+    else:
+        values = map(lambda x: int(x.get('JOBID')), filter(lambda x: x.get('ST') == 'R', values))
     return list(values)
 
 
@@ -235,9 +339,6 @@ def get_online_users() -> List[str]:
 def get_gpu_usage_by_job(job_id) -> float:
     pass
 
-def get_gpu_usage_by_node() -> List:
-    return []
-
 
 def get_nodes() -> Dict:
     command = "scontrol show nodes"
@@ -254,49 +355,124 @@ def get_nodes() -> Dict:
     if _node:
         data.append(_node)
 
-
     data = [map(lambda x: x.split('='), node) for node in data]
     data = [{x[0]: x[1] for x in node} for node in data]
     data = {node['NodeName']: node for node in data}
     return data
 
+
+def get_slurm_jobs(return_dict = False) -> List[SlurmJob]:
+    squeue_data = get_squeue_data(True)
+    res = []
+    for data in squeue_data:
+        _job = SlurmJob()
+        job_id = data.get('JOBID')
+        job_stat = get_sstat_data(job_id)
+        ave_cpu = get_seconds(job_stat.get('AveCPU', '00:00:00'))  # %h:%m:%s
+        _start_time = transfer_time(job_stat.get('Start'))
+        _end_time = transfer_time(job_stat.get('End'))
+        running_time = cal_timedelta(_start_time, _end_time)
+        _job.job_id = job_id
+        _job.submit_time = str(transfer_time(job_stat.get('Submit')) or '')
+        _job.start_time = str(_start_time or '')
+        _job.end_time = str(_end_time or '')
+        _job.user = job_stat.get('User')
+        _job.state = job_stat.get('State')
+        _job.ave_cpu_time = ave_cpu
+        _job.running_time = running_time
+        _job.node = format_node_name(data['NODELIST'].split(','))
+        _job.partition = data['PARTITION']
+        _job.cpu_alloc = data['CPUS']
+        # TODO: 获取数据
+        # _job.cpu_utilization = job_stat.get('CPUUtilization')
+
+
+        _job.gpu_alloc = random.Random().randint(1, 10)
+
+        _job.gpu_used = random.Random().randint(1, _job.gpu_alloc)
+        # _job.cpu_used = random.Random().randint(1, _job.cpu_alloc)
+        # _job.cpu_utilization = _job.cpu_used / _job.cpu_alloc
+        _job.gpu_utilization = _job.gpu_used / _job.gpu_alloc
+        res.append(_job.__dict__ if return_dict else _job)
+    return res
+
 def do_upload_data():
     """上传集群信息到web服务器"""
+    now = datetime.now()
+
     current_user = get_online_users()
     sacct_info = get_sacct_data()
     nodes = get_nodes()
     gpu_stat = get_cluster_gpu_stats()
-    node_gpus = get_gpu_usage_by_node()
+    # node_gpus = get_gpu_usage_by_node()
+    # SlurmModel格式
+    slurm_jobs = get_slurm_jobs(return_dict=True)
+    partitions = get_sinfo_data(return_dict=True)
     data = {
         'current_user': current_user,
-        'jobs': sacct_info,
+        'jobs': slurm_jobs,
+        'all_jobs': sacct_info,
         'nodes': nodes,
         'gpu_stat': gpu_stat,
-        'node_gpu': node_gpus
+        # 'node_gpu': node_gpus,
+        f'partitions_{now.strftime("%Y-%m-%d-%h")}': partitions
     }
     token = generate_token('cluster_exporter')
     header = {
         'Token': token
     }
-    url = 'http://172.16.165.1:8000/data/upload'
+    url = f'{web_domain}/data/upload'
     r = requests.post(url, json=data, headers=header)
 
     print(r.content)
+
 
 
 def upload_data():
     threading.Thread(target=do_upload_data()).start()
 
 
+def do_canceled_job(job_id: List):
+    """根据id取消任务"""
+    for _id in job_id:
+        command = f'scancel {job_id}'
+        subprocess.getoutput(command)
 
-# do_upload_data()
-# print(generate_token('test'))
-# print(get_nodes())
-#
-# print(get_history_job_and_user())
-# get_history_jobs_by_user('root')
-# print(get_online_users())
-# print(get_job_id_filter())
-# print(get_running_jobs_by_user('root'))
-# print(get_running_jobs_by_user('roott'))
-# print(get_sacct_data()[:5])
+
+def update_canceled_data(job_ids: list):
+    """更新web端需要取消的任务数据"""
+    data = {
+        'job_id': job_ids
+    }
+    token = generate_token('cluster_exporter')
+    header = {
+        'Token': token
+    }
+    url = f'{web_domain}/alert/callback'
+    r = requests.post(url, json=data, headers=header)
+
+    print(r.content)
+
+
+def do_check_canceled_job():
+    """检查是否有需要取消的任务"""
+    url = f'{web_domain}/alert/check'
+    r = requests.get(url)
+    if r.status_code == 200:
+        js = r.json()
+        job_id = js['data']
+        assert isinstance(job_id, list)
+        do_canceled_job(job_id)
+        running_jobs = get_running_jobs()
+        success_canceled = []
+        for jid in job_id:
+            if jid not in running_jobs:
+                success_canceled.append(jid)
+        update_canceled_data(success_canceled)
+
+
+def check_need_canceled_job():
+    threading.Thread(target=do_check_canceled_job()).start()
+
+
+# get_sinfo_data()
